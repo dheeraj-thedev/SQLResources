@@ -1,0 +1,106 @@
+-- to create a service program in the Vendor database
+
+USE Vendor
+GO
+CREATE PROCEDURE [dbo].[OnReceiveMessage]
+AS   
+declare @message_type int
+declare @dialog uniqueidentifier,
+@ErrorSave INT,
+@ErrorDesc NVARCHAR(100),
+@message_body NVARCHAR(20);
+while (1 = 1)
+begin
+	begin transaction
+	WAITFOR (
+		RECEIVE top(1)
+			@message_type=message_type_id,
+			@message_body=message_body,   
+			@dialog = conversation_handle 
+			FROM VendorQueue
+	), TIMEOUT 3000  
+
+	if (@@ROWCOUNT = 0)
+		BEGIN
+			Rollback Transaction
+			BREAK
+		END 
+
+	SET @ErrorSave = @@ERROR ;
+	IF (@ErrorSave <> 0)
+	BEGIN
+		ROLLBACK TRANSACTION ;
+		SET @ErrorDesc = N'An error has occurred.' ;
+		END CONVERSATION @dialog 
+		WITH ERROR = @ErrorSave DESCRIPTION = @ErrorDesc ;		
+	END
+	ELSE
+	IF (@message_type <> 2)
+		BEGIN
+		INSERT VList VALUES(@message_body)
+		END
+	ELSE
+		BEGIN
+			END CONVERSATION @dialog
+		END
+	COMMIT TRANSACTION
+END
+
+-- to create message type, contract, queue, and service in the AdventureWorks database
+
+USE AdventureWorks
+GO
+CREATE MESSAGE TYPE SendMessage
+VALIDATION = NONE
+
+CREATE MESSAGE TYPE AcknowledgeMessage
+VALIDATION = NONE
+
+CREATE CONTRACT MyContract
+(SendMessage SENT BY INITIATOR,
+AcknowledgeMessage SENT BY TARGET)
+
+CREATE QUEUE AdvQueue;
+
+CREATE SERVICE VendorService
+ON QUEUE AdvQueue (MyContract)
+
+--  to create message type, contract, queue, and service in the Vendor database
+
+USE Vendor
+GO
+CREATE MESSAGE TYPE SendMessage
+VALIDATION = NONE
+
+CREATE MESSAGE TYPE AcknowledgeMessage
+VALIDATION = NONE
+
+CREATE CONTRACT MyContract
+(SendMessage SENT BY INITIATOR,
+AcknowledgeMessage SENT BY INITIATOR)
+
+CREATE QUEUE VendorQueue
+    WITH STATUS=ON,
+    ACTIVATION (
+        PROCEDURE_NAME = OnReceiveMessage,
+        MAX_QUEUE_READERS = 5,
+		Execute AS SELF) ;
+
+CREATE SERVICE RecieveService
+ON QUEUE VendorQueue(MyContract)
+
+
+-- to create a trigger on INSERT in the AdventureWorks database
+
+USE AdventureWorks
+GO 
+CREATE TRIGGER SendTrigger ON Purchasing.Vendor FOR INSERT AS
+DECLARE @name AS nvarchar(40)
+SELECT @name = Name FROM INSERTED
+DECLARE @dialog_handle UNIQUEIDENTIFIER 
+BEGIN DIALOG CONVERSATION @dialog_handle FROM 
+SERVICE  [VendorService] TO SERVICE 'RecieveService' ON CONTRACT [MyContract] ;
+SEND ON CONVERSATION 
+@dialog_handle MESSAGE TYPE[SendMessage] 
+(@name)
+

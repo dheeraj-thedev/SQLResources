@@ -1,0 +1,121 @@
+-- to create a service program in SalesDB
+
+USE SalesDB
+GO
+CREATE PROCEDURE [dbo].[OnReceiveMessage]
+AS   
+declare @message_type int
+declare @dialog uniqueidentifier,
+@ErrorSave INT,
+@ErrorDesc NVARCHAR(100),
+@message_body int;
+while (1 = 1)
+begin
+	begin transaction
+	WAITFOR (
+		RECEIVE top(1)
+			@message_type=message_type_id,
+			@message_body=message_body,   
+			@dialog = conversation_handle 
+			FROM SalesQueue
+	), TIMEOUT 3000  
+
+	if (@@ROWCOUNT = 0)
+		BEGIN
+			Rollback Transaction
+			BREAK
+		END 
+
+	SET @ErrorSave = @@ERROR ;
+	IF (@ErrorSave <> 0)
+	BEGIN
+		ROLLBACK TRANSACTION ;
+		SET @ErrorDesc = N'An error has occurred.' ;
+		END CONVERSATION @dialog 
+		WITH ERROR = @ErrorSave DESCRIPTION = @ErrorDesc ;		
+	END
+	ELSE
+	IF (@message_type <> 2)
+		BEGIN
+		UPDATE SalesDetails SET TotalSales = TotalSales + @message_body;
+		END
+	ELSE
+		BEGIN
+			END CONVERSATION @dialog
+		END
+	COMMIT TRANSACTION
+END
+
+-- to create the Message Type, Contract, Queue, and Service objects in the AdventureWorks database. 
+
+USE AdventureWorks
+GO
+CREATE MESSAGE TYPE SendMessage
+VALIDATION = NONE
+
+CREATE MESSAGE TYPE AcknowledgeMessage
+VALIDATION = NONE
+
+CREATE CONTRACT MyContract
+(SendMessage SENT BY INITIATOR,
+AcknowledgeMessage SENT BY TARGET)
+
+CREATE QUEUE AdvQueue;
+
+CREATE SERVICE SalesService
+ON QUEUE AdvQueue (MyContract)
+
+
+-- to create the Message Type, Contract, Queue, and Service objects in the SalesDB database. 
+
+USE SalesDB
+GO
+CREATE MESSAGE TYPE SendMessage
+VALIDATION = NONE
+
+CREATE MESSAGE TYPE AcknowledgeMessage
+VALIDATION = NONE
+
+CREATE CONTRACT MyContract
+(SendMessage SENT BY INITIATOR,
+AcknowledgeMessage SENT BY INITIATOR)
+
+CREATE QUEUE SalesQueue
+    WITH STATUS=ON,
+    ACTIVATION (
+        PROCEDURE_NAME = OnReceiveMessage,
+        MAX_QUEUE_READERS = 5,
+		Execute AS SELF) ;
+
+CREATE SERVICE RecieveService
+ON QUEUE SalesQueue (MyContract)
+
+
+-- to create trigger on SalesOrderHeader table
+
+USE AdventureWorks
+GO
+CREATE TRIGGER SendTrigger ON Sales.SalesOrderHeader FOR UPDATE AS
+DECLARE @amt AS int
+SELECT @amt = SubTotal FROM INSERTED
+DECLARE @dialog_handle UNIQUEIDENTIFIER ; 
+BEGIN DIALOG CONVERSATION @dialog_handle FROM 
+SERVICE  [SalesService] TO SERVICE 'RecieveService' ON CONTRACT [MyContract] ;
+SEND ON CONVERSATION 
+@dialog_handle MESSAGE TYPE[SendMessage] 
+(@amt)
+
+
+-- to verify update the ship date in the Sales.SalesOrderHeader table
+
+USE AdventureWorks
+GO
+update Sales.SalesOrderHeader
+set ShipDate = getDate()
+where SalesOrderID = 43692
+
+-- check the total in teh salesdetails table in the SalesDB database
+
+use SalesDB
+go
+select * from salesdetails
